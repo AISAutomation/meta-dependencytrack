@@ -25,20 +25,21 @@ python do_dependencytrack_init() {
     from datetime import datetime
 
     sbom_dir = d.getVar("DEPENDENCYTRACK_DIR")
-    bb.debug(2, "Creating cyclonedx directory: %s" % sbom_dir)
-    bb.utils.mkdirhier(sbom_dir)
+    if not os.path.exists(sbom_dir):
+        bb.debug(2, "Creating cyclonedx directory: %s" % sbom_dir)
+        bb.utils.mkdirhier(sbom_dir)
 
-    bb.debug(2, "Creating empty sbom")
-    write_sbom(d, {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.4",
-        "serialNumber": "urn:uuid:" + str(uuid.uuid4()),
-        "version": 1,
-        "metadata": {
-            "timestamp": datetime.now().isoformat(),
-        },
-        "components": []
-    })
+        bb.debug(2, "Creating empty sbom")
+        write_sbom(d, {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.4",
+            "serialNumber": "urn:uuid:" + str(uuid.uuid4()),
+            "version": 1,
+            "metadata": {
+                "timestamp": datetime.now().isoformat(),
+            },
+            "components": []
+        })
 }
 addhandler do_dependencytrack_init
 do_dependencytrack_init[eventmask] = "bb.event.BuildStarted"
