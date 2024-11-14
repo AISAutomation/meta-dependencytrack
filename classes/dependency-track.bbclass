@@ -114,7 +114,11 @@ python do_dependencytrack_upload () {
 
     sbom = read_sbom(d)
 
-    installed_pkgs = read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/installed_packages.json")
+    try:
+        installed_pkgs = read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/installed_packages.json")
+    except FileNotFoundError:
+        return
+        
     pkgs_names = list(installed_pkgs.keys())
 
     bb.debug(2, f"Removing packages from SBOM: {pkgs_names}")
