@@ -115,7 +115,7 @@ python do_dependencytrack_upload () {
     sbom = read_sbom(d)
 
     try:
-        installed_pkgs = read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/installed_packages.json")
+        installed_pkgs = read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/" + d.getVar("PN") + "_installed_packages.json")
     except FileNotFoundError:
         return
         
@@ -196,7 +196,7 @@ python do_dependencytrack_installed () {
 
     pkgs = image_list_installed_packages(d)
 
-    write_json(d, pkgs, d.getVar("DEPENDENCYTRACK_TMP") + "/installed_packages.json")
+    write_json(d, pkgs, d.getVar("DEPENDENCYTRACK_TMP") + "/" + d.getVar("PN")+ "_installed_packages.json")
 }
 
 ROOTFS_POSTUNINSTALL_COMMAND += "do_dependencytrack_installed;"
@@ -227,16 +227,16 @@ def get_references(d):
     pattern = re.compile(r"http[s]*:\/\/[a-z.]*\/[a-z.\-\/]*[a-z.\-].(tar.([gxl]?z|bz2)|tgz)")
     src_uris = d.getVar("SRC_URI").split(" ")
     refs = []
-    for src in src_uris:
+    for src in src_uris:    # only check the first src uri otherwise we might end up with references of the dependencies
         if src.startswith("git://") or src.endswith(".git"):
             refs.append({"type": "vcs", "url": src})
-
+            break
         elif pattern.match(src):
             refs.append({"type": "source-distribution", "url": src})
-
+            break
         elif src.startswith("http://") or src.startswith("https://"):
             refs.append({"type": "website", "url": src})
-
+            break
     return refs
 
 def get_licenses(d) :
