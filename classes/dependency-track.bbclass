@@ -205,6 +205,10 @@ addhandler do_dependencytrack_upload
 do_dependencytrack_upload[eventmask] = "bb.event.BuildCompleted"
 
 def read_tmp_sbom(d):
+    import uuid
+    import hashlib
+    from datetime import datetime, timezone
+
     if (not fileExists(d, d.getVar("DEPENDENCYTRACK_TMP") + "/bom.json")):
         return {
             "bomFormat": "CycloneDX",
