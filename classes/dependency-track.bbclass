@@ -28,33 +28,6 @@ python do_dependencytrack_init() {
     sbom_dir = d.getVar("DEPENDENCYTRACK_DIR")
     bb.debug(2, "Creating cyclonedx directory: %s" % sbom_dir)
     bb.utils.mkdirhier(sbom_dir)
-
-    bb.debug(2, "Creating empty sbom")
-    write_sbom(d, {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.4",
-        "serialNumber": "urn:uuid:" + str(uuid.uuid4()),
-        "version": 1,
-        "metadata": {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tools": [
-                {
-                    "vendor": "Kontron AIS GmbH",
-                    "name": "dependency-track",
-                    "version": "1.0"
-                }
-            ],
-            "component": {
-                "type": "operating-system",
-                "bom-ref": hashlib.md5(d.getVar("MACHINE", False).encode()).hexdigest(),
-                "group": d.getVar("MACHINE", False),
-                "name": d.getVar("DISTRO_NAME", False) + "-" + d.getVar('MACHINE').replace("kontron-", ""),
-                "version": d.getVar("SECUREOS_RELEASE_VERSION", False)
-            }
-        },
-        "components": [],
-        "dependencies": [],
-    })
 }
 addhandler do_dependencytrack_init
 do_dependencytrack_init[eventmask] = "bb.event.BuildStarted"
@@ -66,7 +39,7 @@ python do_dependencytrack_collect() {
     # load the bom
     name = d.getVar("CVE_PRODUCT")
     version = d.getVar("CVE_VERSION")
-    sbom = read_sbom(d)
+    sbom = read_tmp_sbom(d)
 
         # update it with the new package info
 
@@ -96,7 +69,7 @@ python do_dependencytrack_collect() {
             sbom["components"].append(component_json)
 
     # write it back to the deploy directory
-    write_sbom(d, sbom)
+    write_tmp_sbom(d, sbom)
 }
 
 addtask dependencytrack_collect before do_build after do_fetch
@@ -112,49 +85,7 @@ python do_dependencytrack_upload () {
     from pathlib import Path
     from oe.rootfs import image_list_installed_packages
 
-    sbom = read_sbom(d)
-
-    try:
-        installed_pkgs = read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/" + d.getVar("PN") + "_installed_packages.json")
-    except FileNotFoundError:
-        return
-        
-    pkgs_names = list(installed_pkgs.keys())
-
-    bb.debug(2, f"Removing packages from SBOM: {pkgs_names}")
-
-    sbom["components"] = [component for component in sbom["components"] if component["name"] in pkgs_names]
-
-    components_dict = {component["name"]: component for component in sbom["components"]}
-
-    for sbom_component in sbom["components"]:
-        pkg = installed_pkgs.get(sbom_component["name"])
-        
-        if pkg:
-            for dep in pkg.get("deps", []):
-                dep_component = components_dict.get(dep)
-                if dep_component:
-                    depend = next((d for d in sbom["dependencies"] if d["ref"] == sbom_component["bom-ref"]), None)
-                    if depend is None:
-                        depend = {"ref": sbom_component["bom-ref"], "dependsOn": []}
-                        depend["dependsOn"].append(dep_component["bom-ref"])
-                        sbom["dependencies"].append(depend)
-                    else:  
-                        depend["dependsOn"].append(dep_component["bom-ref"])
-
-    # Extract all ref values
-    all_refs = {component["bom-ref"] for component in sbom["components"]}
-
-    # Extract all dependsOn values
-    all_depends_on = {ref for dependency in sbom["dependencies"] for ref in dependency.get("dependsOn", [])}
-
-    # Find refs that are not in dependsOn
-    refs_not_in_depends_on = all_refs - all_depends_on
-
-    # add dependencies for components that are not in dependsOn
-    sbom["dependencies"].append({ "ref": hashlib.md5(d.getVar("MACHINE", False).encode()).hexdigest(), "dependsOn": list(refs_not_in_depends_on) })
-                
-    write_sbom(d, sbom)
+    sbom = read_deploy_sbom(d)
 
     dt_upload = bb.utils.to_boolean(d.getVar('DEPENDENCYTRACK_UPLOAD'))
     if not dt_upload:
@@ -192,11 +123,80 @@ python do_dependencytrack_upload () {
 
 python do_dependencytrack_installed () {
     from pathlib import Path
+    import hashlib
     from oe.rootfs import image_list_installed_packages
 
-    pkgs = image_list_installed_packages(d)
+    installed_pkgs = image_list_installed_packages(d)
 
-    write_json(d, pkgs, d.getVar("DEPENDENCYTRACK_TMP") + "/" + d.getVar("PN")+ "_installed_packages.json")
+    pkgs_names = list(installed_pkgs.keys())
+
+    bb.debug(2, f"Removing packages from SBOM: {pkgs_names}")
+
+    sbom = read_tmp_sbom(d)
+
+    #    sbom["components"] = [component for component in sbom["components"] if component["name"] in installed_pkgs.keys()] or any(sbom["name"] in prov for prov in ipkg.get("provs", []))]     
+    # Filtern der Komponenten basierend auf pkgs_names und Substrings in provs
+    filtered_components = []
+    for component in sbom["components"]:
+        if component["name"] in pkgs_names:
+            filtered_components.append(component)
+        else:
+            for ipkg in installed_pkgs.values():
+                if any(component["name"] in prov for prov in ipkg.get("provs", [])):
+                    filtered_components.append(component)
+                    break
+
+    sbom["components"] = filtered_components
+
+    components_dict = {component["name"]: component for component in sbom["components"]}
+
+    for sbom_component in sbom["components"]:
+        pkg = installed_pkgs.get(sbom_component["name"])
+        if not pkg:
+            for ipkg in installed_pkgs.values():
+                bb.note(f"Checking if {ipkg.get('provs',[])} contains {sbom_component['name']}")
+                if any(sbom_component["name"] in prov for prov in ipkg.get("provs", [])):
+                    bb.note(f"Found installed package {ipkg} that provides {sbom_component['name']}")
+                    pkg = ipkg
+                    break
+        if pkg:
+            for dep in pkg.get("deps", []):
+                dep_component = components_dict.get(dep)
+
+                # search for the component that provides the dependency
+                if not dep_component:
+                    bb.note(f"Dependency {dep} not found in components")
+                    ipkg = installed_pkgs.get(dep)
+                    if not ipkg:
+                        bb.note(f"Dependency {dep} not found in installed packages")
+                    else:
+                        for prov in ipkg.get("provs", []):
+                            dep_component = components_dict.get(prov)
+                            if dep_component:
+                                break
+
+                if dep_component:
+                    depend = next((d for d in sbom["dependencies"] if d["ref"] == sbom_component["bom-ref"]), None)
+                    if depend is None:
+                        depend = {"ref": sbom_component["bom-ref"], "dependsOn": []}
+                        depend["dependsOn"].append(dep_component["bom-ref"])
+                        sbom["dependencies"].append(depend)
+                    else:  
+                        depend["dependsOn"].append(dep_component["bom-ref"])
+
+    # Extract all ref values
+    all_refs = {component["bom-ref"] for component in sbom["components"]}
+
+    # Extract all dependsOn values
+    all_depends_on = {ref for dependency in sbom["dependencies"] for ref in dependency.get("dependsOn", [])}
+
+    # Find refs that are not in dependsOn
+    refs_not_in_depends_on = all_refs - all_depends_on
+
+    # add dependencies for components that are not in dependsOn
+    sbom["dependencies"].append({ "ref": hashlib.md5(d.getVar("MACHINE", False).encode()).hexdigest(), "dependsOn": list(refs_not_in_depends_on) })
+                
+    write_deploy_sbom(d, sbom)
 }
 
 ROOTFS_POSTUNINSTALL_COMMAND += "do_dependencytrack_installed;"
@@ -204,16 +204,52 @@ ROOTFS_POSTUNINSTALL_COMMAND += "do_dependencytrack_installed;"
 addhandler do_dependencytrack_upload
 do_dependencytrack_upload[eventmask] = "bb.event.BuildCompleted"
 
-def read_sbom(d):
-    return read_json(d, d.getVar("DEPENDENCYTRACK_SBOM"))
+def read_tmp_sbom(d):
+    if (not fileExists(d, d.getVar("DEPENDENCYTRACK_TMP") + "/bom.json")):
+        return {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.4",
+            "serialNumber": "urn:uuid:" + str(uuid.uuid4()),
+            "version": 1,
+            "metadata": {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tools": [
+                    {
+                        "vendor": "Kontron AIS GmbH",
+                        "name": "dependency-track",
+                        "version": "1.0"
+                    }
+                ],
+                "component": {
+                    "type": "operating-system",
+                    "bom-ref": hashlib.md5(d.getVar("MACHINE", False).encode()).hexdigest(),
+                    "group": d.getVar("MACHINE", False),
+                    "name": d.getVar("DISTRO_NAME", False) + "-" + d.getVar('MACHINE').replace("kontron-", ""),
+                    "version": d.getVar("SECUREOS_RELEASE_VERSION", False)
+                }
+            },
+            "components": [],
+            "dependencies": [],
+        }
+    return read_json(d, d.getVar("DEPENDENCYTRACK_TMP") + "/bom.json")
 
 def read_json(d, path):
     import json
     from pathlib import Path
     return json.loads(Path(path).read_text())
 
-def write_sbom(d, sbom):
+def write_tmp_sbom(d, sbom):
+    write_json(d, sbom, d.getVar("DEPENDENCYTRACK_TMP") + "/bom.json")
+
+def write_deploy_sbom(d, sbom):
     write_json(d, sbom, d.getVar("DEPENDENCYTRACK_SBOM"))
+
+def read_deploy_sbom(d):
+    return read_json(d, d.getVar("DEPENDENCYTRACK_SBOM"))
+
+def fileExists(d, path):
+    from pathlib import Path
+    return Path(path).exists()
 
 def write_json(d, data, path):
     import json
